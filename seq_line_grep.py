@@ -3,6 +3,7 @@ import re
 import enum
 import os
 import pandas as pd
+import sys
 
 
 class Grepper:
@@ -126,11 +127,26 @@ def get_fp_list(dir_root, settings):
 
     return fp_lst
 
+
+def get_paths():
+    print(f'len(sys.argv)={len(sys.argv)}')
+
+    if len(sys.argv) == 4:
+        fp_settings = sys.argv[1]
+        dir_src = sys.argv[2]
+        dir_out = sys.argv[3]
+    else:
+        fp_settings = input('settings.yaml: ').replace('"', '')
+        dir_src = input('Data Folder: ').replace('"', '')
+        dir_out = input('Out Folder: ').replace('"', '')
+
+    return fp_settings, dir_src, dir_out
+
 def main():
+
     # get paths from the user
-    fp_settings = input('settings.yaml: ').replace('"', '')
-    dir_src = input('Data Folder: ').replace('"', '')
-    dir_out = input('Out Folder: ').replace('"', '')
+    fp_settings, dir_src, dir_out = get_paths()
+
     
     # initialize
     settings = Settings(fp_settings)
