@@ -1,10 +1,17 @@
+import datetime
+from operator import index
 import yaml
 import re
 import enum
 import os
 import pandas as pd
-import sys
+import argparse
+from tqdm import tqdm
 
+log_lst = []
+
+def current_time():
+    return datetime.datetime.now().strftime('%H:%M:%S')
 
 class Grepper:
     line_id = -1
@@ -31,8 +38,8 @@ class Grepper:
             try:
                 record = list(match.groups())
             except AttributeError as e:
-                print(e)
-                print(f"""Mismatch Warning!\nline={line}\nkey_substring={self.key_substring}\nre_pattern={self.re_pattern}""")
+                err_evt = f"""{current_time()} Pattern'{self.re_pattern}' failed with keyword '{self.key_substring}' on line'{line}'"""
+                log_lst.append(err_evt)
                 return False
             else:
                 # if groups() is get successfully, increment the line count
@@ -54,39 +61,20 @@ class Settings:
 
     def __init__(self, fp_settings):
         with open(fp_settings, 'r') as f:
-            self.settings = list(yaml.safe_load_all(f))
+            self.doc_lst = list(yaml.safe_load_all(f))
 
-    # file search options
-    def file_path_filter_regexp(self) -> str:
-        return self.settings[SettingsDocumentIndex.FILE_SETTINGS]['file_path_filter_regexp']
-
-    def search_recursively(self) -> bool:
-        return self.settings[SettingsDocumentIndex.FILE_SETTINGS]['search_recursively']
-
-    def sort_by_date_modified(self) -> bool:
-        return self.settings[SettingsDocumentIndex.FILE_SETTINGS]['sort_by_date_modified']
-
-    def code_page_read(self) -> str:
-        return self.settings[SettingsDocumentIndex.FILE_SETTINGS]['code_page_read']
-
-    def code_page_write(self) -> str:
-        return self.settings[SettingsDocumentIndex.FILE_SETTINGS]['code_page_write']
-
-    def output_file_extension(self) -> str:
-        return self.settings[SettingsDocumentIndex.FILE_SETTINGS]['output_file_extension']
-
-    def column_separator_character_integer(self) -> str:
-        return self.settings[SettingsDocumentIndex.FILE_SETTINGS]['column_separator_character_integer']
+    def get_file_settings(self, key_name):
+        return self.doc_lst[SettingsDocumentIndex.FILE_SETTINGS][key_name]
 
     # regular expression objects
     def get_grepper_list(self):
         grepper_lst = []
-        for unique_pattern in self.settings[SettingsDocumentIndex.UNIQUE_PATTERNS]:
+        for unique_pattern in self.doc_lst[SettingsDocumentIndex.UNIQUE_PATTERNS]:
             cls_regexp = Grepper(
                 table_name=unique_pattern['table_name'],
                 key_substring=unique_pattern['key_substring'],
-                field_names=['line_id']+self.settings[SettingsDocumentIndex.COMMON_PATTERNS]['field_names'] + unique_pattern['field_names'],
-                regexp_pattern=self.settings[SettingsDocumentIndex.COMMON_PATTERNS]['regexp_pattern'] + unique_pattern['regexp_pattern'] + '\n')
+                field_names=['line_id']+self.doc_lst[SettingsDocumentIndex.COMMON_PATTERNS]['field_names'] + unique_pattern['field_names'],
+                regexp_pattern=self.doc_lst[SettingsDocumentIndex.COMMON_PATTERNS]['regexp_pattern'] + unique_pattern['regexp_pattern'] + '\n')
             grepper_lst.append(cls_regexp)
         return grepper_lst
 
@@ -112,63 +100,104 @@ def get_fp_list(dir_root, settings):
             if os.path.isfile(fp):
                 fp_lst.append(fp)
     
-    if settings.search_recursively():
+    if settings.get_file_settings('search_recursively'):
         populate_file_list_recusively()
     else:
         populate_file_list_without_recursion()
     
     # filter by regular expression pattern
-    fp_pattern = re.compile(settings.file_path_filter_regexp())
+    fp_pattern = re.compile(settings.get_file_settings('file_path_filter_regexp'))
     fp_lst = list(filter(lambda x: fp_pattern.match(x), fp_lst))
 
     # sort by file modified date
-    if settings.sort_by_date_modified():
+    if settings.get_file_settings('sort_by_date_modified'):
         fp_lst.sort(key=lambda x: os.path.getmtime(x))
 
     return fp_lst
 
+def concatenate_tables(fp_settings, dir_src, dir_dst):
+    # initialize
+    settings = Settings(fp_settings)
+    sep = chr(int(settings.get_file_settings('column_separator_character_integer')))
+    encoding = settings.get_file_settings('code_page_write')
+    extension = settings.get_file_settings('output_file_extension')
+    df_lst = []
+    keys = []
+    for root, dirs, files in os.walk(dir_src):
+        for file in files:
+            fp = os.path.join(root, file)
+            df = pd.read_csv(fp, sep=sep, index_col=1, encoding=encoding)
+            df_lst.append(df)
+            keys.append(os.path.splitext(file)[0])
+    df_all = pd.concat(df_lst, keys=keys)
+    fn_out = '~'.join(keys) + extension
+    fp_out = os.path.join(dir_dst, fn_out)
+    df_all.to_csv(fp_out, sep=sep, encoding=encoding)
 
-def get_paths():
-    print(f'len(sys.argv)={len(sys.argv)}')
+def create_tables(fp_settings, dir_src, dir_out):
 
-    if len(sys.argv) == 4:
-        fp_settings = sys.argv[1]
-        dir_src = sys.argv[2]
-        dir_out = sys.argv[3]
-    else:
-        fp_settings = input('settings.yaml: ').replace('"', '')
-        dir_src = input('Data Folder: ').replace('"', '')
-        dir_out = input('Out Folder: ').replace('"', '')
-
-    return fp_settings, dir_src, dir_out
-
-def main():
-
-    # get paths from the user
-    fp_settings, dir_src, dir_out = get_paths()
-
-    
     # initialize
     settings = Settings(fp_settings)
     grepper_lst = settings.get_grepper_list()
     fp_lst = get_fp_list(dir_src, settings)
-    
-    # populate data
-    for fp in fp_lst:
-        with open(fp, 'r', encoding=settings.code_page_read()) as f:
-            for line in f.readlines():
-                for grepper in grepper_lst:
-                    if grepper.add_record(line):
-                        break
 
-    for grepper in grepper_lst:
+    # loop through files and show the progress bar with tqdm
+    print(f'{current_time()} start reading files...')
+    for fp in tqdm(fp_lst):
+        with open(fp, 'r', encoding=settings.get_file_settings('code_page_read')) as f:
+            while True:
+                try:
+                    line = f.readline()
+                # ignore the decoding errors.
+                except UnicodeDecodeError as e:
+                    err_msg = f'{current_time()} Decode Error on {fp}. Details: {e}'
+                    log_lst.append(err_msg)
+                    continue
+                else:
+                    # If line length is 0, get out of wihle loop.
+                    # In case of empty line, line length is 1 because of '\n'
+                    # line length 0 only occurs at the end of the file.
+                    if len(line) == 0:
+                        break
+                    # populate grepper
+                    for grepper in grepper_lst:
+                        if grepper.add_record(line):
+                            break
+
+    print(f'{current_time()} saving files...')
+    for grepper in tqdm(grepper_lst):
         df = pd.DataFrame(data=grepper.records, columns=grepper.field_names)
         df.index.name='row_id'
-        print(df)
+        fp_out = os.path.join(dir_out, grepper.table_name + settings.get_file_settings('output_file_extension'))
+        df.to_csv(fp_out, 
+        sep=chr(settings.get_file_settings('column_separator_character_integer')), 
+        encoding=settings.get_file_settings('code_page_write'))
+        log_lst.append(f'{current_time()} {fp_out} was created.')
 
-        fp_out = os.path.join(dir_out, grepper.table_name + settings.output_file_extension())
+    print(f'{current_time()} completed table creation.')
 
-        df.to_csv(fp_out, sep=chr(settings.column_separator_character_integer()), encoding=settings.code_page_write())
+    fp_log = os.path.join(dir_out, 'log.yaml')
+    with open(fp_log, 'w', encoding='utf-8') as f:
+        yaml.safe_dump(log_lst, f, default_flow_style=False)
+
+    print(f'{current_time()} log file "{fp_log}" was created.')
+
+def main():
+    parser = argparse.ArgumentParser(description='Grep and concatenate tables')
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('-g', '--grep', action='store_true', help='Grep groups from text files and create tables')
+    group.add_argument('-c', '--concatenate', action='store_true', help='Concatenate the grepped tables')
+    parser.add_argument('-y', '--yamlfile', metavar='file_yaml', required=True, help='YAML file that stores Grep settings')
+    parser.add_argument('-i', '--inputdir', metavar='dir_src', required=True, help='Input folder with data files')
+    parser.add_argument('-o', '--outputdir', metavar='dir_dst', required=True, help='Empty folder to output files')
+    args = parser.parse_args()    
+
+    if args.grep:
+        create_tables(args.yamlfile, args.inputdir, args.outputdir)
+    elif args.concatenate:
+        concatenate_tables(args.yamlfile, args.inputdir, args.outputdir)
+    else:
+        print('Select either -g or -c')
 
 if __name__ == '__main__':
     main()

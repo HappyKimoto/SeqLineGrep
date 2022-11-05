@@ -1,1 +1,5 @@
 .vscode
+build
+dist
+*.spec
+_quick_test.py
